@@ -11,7 +11,7 @@ function Write-Step($text)   { Write-Host "  >> $text" -ForegroundColor Green }
 function Write-Warn($text)   { Write-Host "  !! $text" -ForegroundColor Red }
 function Write-Info($text)   { Write-Host "  -- $text" -ForegroundColor Gray }
 
-# ── Require Administrator (all on one line to survive iex) ───────────────────
+# ── Require Administrator (single line for iex compatibility) ─────────────────
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")) { Write-Warning "Not Administrator - relaunching elevated..."; Start-Process powershell "-ExecutionPolicy Bypass -Command `"irm https://raw.githubusercontent.com/amincoding/winscript/main/install-script.ps1 | iex`"" -Verb RunAs; Exit }
 
 # ── Detect Windows version ────────────────────────────────────────────────────
@@ -165,11 +165,45 @@ if (-not $WingetExe) {
     Write-Step "Winget sources updated"
 }
 
+# ── Smart Install-App with automatic retry logic ──────────────────────────────
+# Exit codes:
+#   0            = success
+#  -1978335189   = already installed (treat as success)
+#  -1978335212   = NO_APPLICABLE_INSTALLER (app doesn't support --scope machine)
+#  -2147012867   = network error / connection reset (retry)
+
 function Install-App {
-    param([string]$AppName, [string]$WingetID)
+    param([string]$AppName, [string]$WingetID, [switch]$NoScope)
     if (-not $WingetExe) { Write-Warn "Winget unavailable — skipping $AppName"; return }
+
     Write-Step "Installing $AppName..."
-    & $WingetExe install --id $WingetID --exact --scope machine --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+
+    # Attempt 1: with --scope machine (unless NoScope flag set)
+    if ($NoScope) {
+        & $WingetExe install --id $WingetID --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+    } else {
+        & $WingetExe install --id $WingetID --exact --scope machine --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+    }
+
+    # Attempt 2: scope machine failed (NO_APPLICABLE_INSTALLER) — retry without scope
+    if ($LASTEXITCODE -eq -1978335212) {
+        Write-Info "  Scope machine not supported — retrying without scope..."
+        & $WingetExe install --id $WingetID --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+    }
+
+    # Attempt 3: network error — wait 5 seconds and retry
+    if ($LASTEXITCODE -eq -2147012867) {
+        Write-Info "  Network error — waiting 5s and retrying..."
+        Start-Sleep -Seconds 5
+        & $WingetExe install --id $WingetID --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+    }
+
+    # Attempt 4: still failing — try without --exact (catches source index issues)
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+        Write-Info "  Retrying without --exact..."
+        & $WingetExe install --id $WingetID --silent --accept-package-agreements --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+    }
+
     if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {
         Write-Host "     [OK] $AppName" -ForegroundColor Green
     } else {
@@ -183,7 +217,7 @@ function Install-App {
 Write-Header "7. Installing Applications"
 
 Install-App "WinRAR"        "RARLab.WinRAR"
-Install-App "AnyDesk"       "AnyDeskSoftwareGmbH.AnyDesk"
+Install-App "AnyDesk"       "AnyDeskSoftwareGmbH.AnyDesk"   -NoScope
 Install-App "VLC Player"    "VideoLAN.VLC"
 Install-App "Foxit Reader"  "Foxit.FoxitReader"
 Install-App "Google Chrome" "Google.Chrome"
